@@ -88,6 +88,22 @@ body {
   margin-bottom: 8px;
 }
 
+.connection-split {
+  display: grid;
+  gap: 10px;
+}
+
+.connection-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fffaf1;
+  padding: 10px;
+}
+
+.connection-card h3 {
+  margin-top: 0;
+}
+
 h2,
 h3 {
   margin: 0 0 10px;

@@ -17,8 +17,24 @@
         <h2>Подключение</h2>
         <div class="grid">
           <label>
+            Provider
+            <select id="provider">
+              <option value="ollama">ollama</option>
+              <option value="openai">openai-compatible</option>
+            </select>
+          </label>
+          <div class="hint">Для openai-compatible используются `GET /v1/models` и `POST /v1/chat/completions`</div>
+          <label>
             Host
             <input id="host" type="text" value="http://127.0.0.1:11434" />
+          </label>
+          <label>
+            API Key
+            <input id="apiKey" type="password" placeholder="api key (опционально для ollama)" />
+          </label>
+          <label>
+            Token
+            <input id="token" type="password" placeholder="bearer token (если требуется провайдером)" />
           </label>
           <label>
             Timeout

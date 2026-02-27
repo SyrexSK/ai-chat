@@ -86,6 +86,91 @@ class OllamaClient:
         return content.strip()
 
 
+class OpenAICompatibleClient:
+    def __init__(self, base_url: str, api_key: str = "", token: str = "", timeout: float = 120.0) -> None:
+        normalized = base_url.rstrip("/")
+        for suffix in ("/v1/chat/completions", "/chat/completions", "/v1"):
+            if normalized.endswith(suffix):
+                normalized = normalized[: -len(suffix)]
+                break
+        self.base_url = normalized.rstrip("/")
+        self.api_key = api_key.strip()
+        self.token = token.strip()
+        self.timeout = timeout
+
+    def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        data = None
+        headers: dict[str, str] = {}
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        auth_value = self.token or self.api_key
+        if auth_value:
+            headers["Authorization"] = f"Bearer {auth_value}"
+        if self.api_key:
+            headers["X-API-Key"] = self.api_key
+
+        req = Request(
+            f"{self.base_url}{path}",
+            data=data,
+            headers=headers,
+            method=method,
+        )
+        try:
+            with urlopen(req, timeout=self.timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"HTTP {exc.code}: {body}") from exc
+        except URLError as exc:
+            raise RuntimeError(
+                f"Cannot connect to OpenAI-compatible endpoint at {self.base_url}"
+            ) from exc
+
+    def list_models(self) -> list[str]:
+        data = self._request("GET", "/v1/models")
+        raw = data.get("data", [])
+        models: list[str] = []
+        for item in raw:
+            model_id = item.get("id") if isinstance(item, dict) else None
+            if isinstance(model_id, str) and model_id:
+                models.append(model_id)
+        return models
+
+    def chat(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        options: dict[str, Any] | None = None,
+    ) -> str:
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+        }
+        if options:
+            if "temperature" in options:
+                payload["temperature"] = options["temperature"]
+            if "num_predict" in options:
+                payload["max_tokens"] = options["num_predict"]
+
+        data = self._request("POST", "/v1/chat/completions", payload)
+        choices = data.get("choices", [])
+        if not choices:
+            return ""
+        msg = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            text_parts: list[str] = []
+            for part in content:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    text_parts.append(part["text"])
+            return "\n".join(text_parts).strip()
+        if isinstance(content, str):
+            return content.strip()
+        return ""
+
+
 def load_system_prompts(path: Path) -> dict[str, str]:
     if not path.exists():
         path.write_text(json.dumps(DEFAULT_PROMPTS, indent=2), encoding="utf-8")

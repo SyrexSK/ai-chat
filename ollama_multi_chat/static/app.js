@@ -1,5 +1,8 @@
 const statusEl = document.getElementById("status");
+const providerEl = document.getElementById("provider");
 const hostEl = document.getElementById("host");
+const apiKeyEl = document.getElementById("apiKey");
+const tokenEl = document.getElementById("token");
 const timeoutEl = document.getElementById("timeout");
 const delayEl = document.getElementById("delay");
 const agentsEl = document.getElementById("agents");
@@ -8,11 +11,19 @@ const agentModelEl = document.getElementById("agentModel");
 const promptPresetEl = document.getElementById("promptPreset");
 const systemPromptEl = document.getElementById("systemPrompt");
 const historyEl = document.getElementById("history");
+const commentatorHistoryEl = document.getElementById("commentatorHistory");
 const userTextEl = document.getElementById("userText");
+const commentatorStatusEl = document.getElementById("commentatorStatus");
+const commentatorNameEl = document.getElementById("commentatorName");
+const commentatorModelEl = document.getElementById("commentatorModel");
+const commentatorPresetEl = document.getElementById("commentatorPreset");
+const commentatorPromptEl = document.getElementById("commentatorPrompt");
 
 let selectedAgent = "";
 let state = null;
 let configDirty = false;
+let systemPromptDirty = false;
+let commentatorDirty = false;
 
 async function api(path, method = "GET", body = null) {
   const response = await fetch(path, {
@@ -50,10 +61,33 @@ function renderMessageContent(value) {
     .replace(/\n/g, "<br>");
 }
 
+function renderHistory(container, messages) {
+  const prevScrollTop = container.scrollTop;
+  const prevScrollHeight = container.scrollHeight;
+  const wasNearBottom = prevScrollHeight - (prevScrollTop + container.clientHeight) < 40;
+
+  container.innerHTML = (messages || [])
+    .map((msg) => {
+      const role = msg.role || "assistant";
+      return `<div class="msg ${escapeHtml(role)}"><div class="head">${escapeHtml(msg.speaker)}</div><div>${renderMessageContent(msg.content || "")}</div></div>`;
+    })
+    .join("");
+
+  if (wasNearBottom) {
+    container.scrollTop = container.scrollHeight;
+  } else {
+    const delta = container.scrollHeight - prevScrollHeight;
+    container.scrollTop = Math.max(0, prevScrollTop + delta);
+  }
+}
+
 function renderState(nextState) {
   state = nextState;
   if (!configDirty) {
+    providerEl.value = state.provider || "ollama";
     hostEl.value = state.host || hostEl.value;
+    apiKeyEl.value = state.api_key || "";
+    tokenEl.value = state.token || "";
     timeoutEl.value = state.timeout;
     delayEl.value = state.delay;
   }
@@ -64,13 +98,38 @@ function renderState(nextState) {
   agentModelEl.innerHTML = models.map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join("");
   if (currentModel && models.includes(currentModel)) {
     agentModelEl.value = currentModel;
+  } else if (models.length > 0) {
+    agentModelEl.value = models[0];
   }
 
   const prompts = state.prompts || {};
   const promptKeys = Object.keys(prompts);
+  const currentPreset = promptPresetEl.value;
   promptPresetEl.innerHTML = promptKeys.map((key) => `<option value="${escapeHtml(key)}">${escapeHtml(key)}</option>`).join("");
-  if (!systemPromptEl.value && promptKeys.length > 0) {
-    systemPromptEl.value = prompts[promptKeys[0]];
+  if (currentPreset && promptKeys.includes(currentPreset)) {
+    promptPresetEl.value = currentPreset;
+  } else if (promptKeys.length > 0) {
+    promptPresetEl.value = promptKeys[0];
+  }
+  if (!systemPromptDirty && promptPresetEl.value) {
+    systemPromptEl.value = prompts[promptPresetEl.value] || "";
+  }
+  const currentCommentatorModel = commentatorModelEl.value;
+  commentatorModelEl.innerHTML = models.map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join("");
+  if (currentCommentatorModel && models.includes(currentCommentatorModel)) {
+    commentatorModelEl.value = currentCommentatorModel;
+  } else if (models.length > 0) {
+    commentatorModelEl.value = models[0];
+  }
+  const currentCommentatorPreset = commentatorPresetEl.value;
+  commentatorPresetEl.innerHTML = promptKeys.map((key) => `<option value="${escapeHtml(key)}">${escapeHtml(key)}</option>`).join("");
+  if (currentCommentatorPreset && promptKeys.includes(currentCommentatorPreset)) {
+    commentatorPresetEl.value = currentCommentatorPreset;
+  } else if (promptKeys.length > 0) {
+    commentatorPresetEl.value = promptKeys[0];
+  }
+  if (!commentatorDirty && commentatorPresetEl.value) {
+    commentatorPromptEl.value = prompts[commentatorPresetEl.value] || "";
   }
 
   agentsEl.innerHTML = (state.agents || [])
@@ -84,22 +143,18 @@ function renderState(nextState) {
     selectedAgent = "";
   }
 
-  const prevScrollTop = historyEl.scrollTop;
-  const prevScrollHeight = historyEl.scrollHeight;
-  const wasNearBottom = prevScrollHeight - (prevScrollTop + historyEl.clientHeight) < 40;
+  renderHistory(historyEl, state.history || []);
+  renderHistory(commentatorHistoryEl, state.commentator_history || []);
 
-  historyEl.innerHTML = (state.history || [])
-    .map((msg) => {
-      const role = msg.role || "assistant";
-      return `<div class="msg ${escapeHtml(role)}"><div class="head">${escapeHtml(msg.speaker)}</div><div>${renderMessageContent(msg.content || "")}</div></div>`;
-    })
-    .join("");
-
-  if (wasNearBottom) {
-    historyEl.scrollTop = historyEl.scrollHeight;
+  if (state.commentator) {
+    commentatorStatusEl.textContent = `Подключен: ${state.commentator.name} <${state.commentator.model}>`;
+    if (!commentatorDirty) {
+      commentatorNameEl.value = state.commentator.name || commentatorNameEl.value;
+      commentatorModelEl.value = state.commentator.model || commentatorModelEl.value;
+      commentatorPromptEl.value = state.commentator.system_prompt || commentatorPromptEl.value;
+    }
   } else {
-    const delta = historyEl.scrollHeight - prevScrollHeight;
-    historyEl.scrollTop = Math.max(0, prevScrollTop + delta);
+    commentatorStatusEl.textContent = "Не подключен";
   }
 
   if (state.last_error) {
@@ -124,7 +179,10 @@ function setupEvents() {
   document.getElementById("saveConfig").addEventListener("click", () =>
     safeAction(async () => {
       const payload = await api("/api/config", "POST", {
+        provider: providerEl.value,
         host: hostEl.value,
+        api_key: apiKeyEl.value,
+        token: tokenEl.value,
         timeout: Number(timeoutEl.value),
         delay: Number(delayEl.value),
       });
@@ -148,7 +206,28 @@ function setupEvents() {
         system_prompt: systemPromptEl.value,
       });
       agentNameEl.value = "";
+      systemPromptDirty = false;
       await loadState();
+    }),
+  );
+
+  document.getElementById("setCommentator").addEventListener("click", () =>
+    safeAction(async () => {
+      const payload = await api("/api/commentator", "POST", {
+        name: commentatorNameEl.value.trim(),
+        model: commentatorModelEl.value,
+        system_prompt: commentatorPromptEl.value,
+      });
+      commentatorDirty = false;
+      renderState(payload);
+    }),
+  );
+
+  document.getElementById("clearCommentator").addEventListener("click", () =>
+    safeAction(async () => {
+      const payload = await api("/api/commentator", "DELETE");
+      commentatorDirty = false;
+      renderState(payload);
     }),
   );
 
@@ -202,6 +281,15 @@ function setupEvents() {
       return;
     }
     systemPromptEl.value = state.prompts[key];
+    systemPromptDirty = false;
+  });
+  commentatorPresetEl.addEventListener("change", () => {
+    const key = commentatorPresetEl.value;
+    if (!state?.prompts || !state.prompts[key]) {
+      return;
+    }
+    commentatorPromptEl.value = state.prompts[key];
+    commentatorDirty = false;
   });
 
   agentsEl.addEventListener("click", (event) => {
@@ -220,7 +308,16 @@ function setupEvents() {
     }
   });
 
+  providerEl.addEventListener("change", () => {
+    configDirty = true;
+  });
   hostEl.addEventListener("input", () => {
+    configDirty = true;
+  });
+  apiKeyEl.addEventListener("input", () => {
+    configDirty = true;
+  });
+  tokenEl.addEventListener("input", () => {
     configDirty = true;
   });
   timeoutEl.addEventListener("input", () => {
@@ -228,6 +325,18 @@ function setupEvents() {
   });
   delayEl.addEventListener("input", () => {
     configDirty = true;
+  });
+  systemPromptEl.addEventListener("input", () => {
+    systemPromptDirty = true;
+  });
+  commentatorNameEl.addEventListener("input", () => {
+    commentatorDirty = true;
+  });
+  commentatorModelEl.addEventListener("change", () => {
+    commentatorDirty = true;
+  });
+  commentatorPromptEl.addEventListener("input", () => {
+    commentatorDirty = true;
   });
 }
 

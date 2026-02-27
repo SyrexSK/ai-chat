@@ -24,7 +24,7 @@ body {
 }
 
 .layout {
-  max-width: 1280px;
+  max-width: 1680px;
   margin: 0 auto;
   padding: 18px;
   display: grid;
@@ -33,7 +33,7 @@ body {
   max-height: 100vh;
   align-content: start;
   grid-template-rows: auto minmax(0, 1fr);
-  grid-template-columns: 320px 360px 1fr;
+  grid-template-columns: 260px 300px minmax(820px, 1fr);
   grid-template-areas:
     "topbar topbar topbar"
     "settings agents chat";
@@ -82,6 +82,12 @@ body {
   min-height: 0;
 }
 
+.hint {
+  color: var(--muted);
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
 h2,
 h3 {
   margin: 0 0 10px;
@@ -102,6 +108,7 @@ label {
   gap: 4px;
   color: var(--muted);
   font-size: 14px;
+  min-width: 0;
 }
 
 input,
@@ -119,6 +126,13 @@ select {
   background: #fff;
   padding: 8px 10px;
   color: var(--ink);
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+select {
+  text-overflow: ellipsis;
 }
 
 textarea {
@@ -189,6 +203,23 @@ button:hover {
   height: 100%;
 }
 
+.history-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  gap: 10px;
+  min-height: 0;
+}
+
+.history-wrap {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.history-wrap h3 {
+  margin: 0 0 8px;
+}
+
 .msg {
   margin-bottom: 10px;
   line-height: 1.35;
@@ -231,5 +262,9 @@ button:hover {
   .history {
     min-height: 300px;
     height: 300px;
+  }
+
+  .history-grid {
+    grid-template-columns: 1fr;
   }
 }

@@ -17,8 +17,24 @@
         <h2>Подключение</h2>
         <div class="grid">
           <label>
+            Provider
+            <select id="provider">
+              <option value="ollama">ollama</option>
+              <option value="openai">openai-compatible</option>
+            </select>
+          </label>
+          <div class="hint">Для openai-compatible используются `GET /v1/models` и `POST /v1/chat/completions`</div>
+          <label>
             Host
             <input id="host" type="text" value="http://127.0.0.1:11434" />
+          </label>
+          <label>
+            API Key
+            <input id="apiKey" type="password" placeholder="api key (опционально для ollama)" />
+          </label>
+          <label>
+            Token
+            <input id="token" type="password" placeholder="bearer token (если требуется провайдером)" />
           </label>
           <label>
             Timeout
@@ -64,11 +80,45 @@
           <button id="addAgent">Подключить</button>
           <button id="removeAgent" class="danger">Удалить выбранного</button>
         </div>
+
+        <h3>Комментатор</h3>
+        <div id="commentatorStatus" class="hint">Не подключен</div>
+        <div class="grid">
+          <label>
+            Имя
+            <input id="commentatorName" type="text" value="Аналитик" />
+          </label>
+          <label>
+            Модель
+            <select id="commentatorModel"></select>
+          </label>
+          <label>
+            Пресет
+            <select id="commentatorPreset"></select>
+          </label>
+        </div>
+        <label>
+          Prompt комментатора
+          <textarea id="commentatorPrompt" rows="4"></textarea>
+        </label>
+        <div class="row">
+          <button id="setCommentator">Подключить комментатора</button>
+          <button id="clearCommentator" class="danger">Отключить</button>
+        </div>
       </section>
 
       <section class="panel chat">
-        <h2>Диалог</h2>
-        <div id="history" class="history"></div>
+        <h2>Диалог И Комментарии</h2>
+        <div class="history-grid">
+          <div class="history-wrap">
+            <h3>Основной чат</h3>
+            <div id="history" class="history"></div>
+          </div>
+          <div class="history-wrap">
+            <h3>Комментарии комментатора</h3>
+            <div id="commentatorHistory" class="history"></div>
+          </div>
+        </div>
         <label>
           Ваше сообщение
           <textarea id="userText" rows="3" placeholder="Enter = отправить, Shift+Enter = новая строка"></textarea>

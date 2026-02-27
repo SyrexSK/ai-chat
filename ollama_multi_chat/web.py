@@ -19,6 +19,16 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 
 @dataclass
+class ConnectionConfig:
+    connection_id: str
+    provider: str
+    host: str
+    api_key: str = ""
+    token: str = ""
+    timeout: float = 100.0
+
+
+@dataclass
 class ChatServerState:
     prompts_path: Path
     provider: str = "ollama"
@@ -30,12 +40,23 @@ class ChatServerState:
 
     def __post_init__(self) -> None:
         self.prompts = load_system_prompts(self.prompts_path)
-        self.client: OllamaClient | OpenAICompatibleClient
-        self.client = OllamaClient(self.host, timeout=self.timeout)
-        self.available_models: list[str] = []
+        self.connections: dict[str, ConnectionConfig] = {
+            "default": ConnectionConfig(
+                connection_id="default",
+                provider=self.provider,
+                host=self.host,
+                api_key=self.api_key,
+                token=self.token,
+                timeout=self.timeout,
+            )
+        }
+        self.clients: dict[str, OllamaClient | OpenAICompatibleClient] = {}
+        self.models_by_connection: dict[str, list[str]] = {"default": []}
         self.agents: list[Agent] = []
+        self.agent_connections: dict[str, str] = {}
         self.history: list[Message] = []
         self.commentator: Agent | None = None
+        self.commentator_connection_id: str = "default"
         self.commentator_history: list[Message] = []
 
         self.running = False
@@ -54,7 +75,7 @@ class ChatServerState:
         self.commentator_context: list[dict[str, str]] = []
         self.commentator_seen_count = 0
 
-        self.refresh_models(raise_error=False)
+        self.refresh_models(connection_id="default", raise_error=False)
 
     def _normalize_text(self, text: str) -> str:
         normalized = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -94,6 +115,7 @@ class ChatServerState:
     def _chat_with_auto_continue(
         self,
         *,
+        client: OllamaClient | OpenAICompatibleClient,
         agent_name: str,
         model: str,
         context: list[dict[str, str]],
@@ -102,7 +124,7 @@ class ChatServerState:
     ) -> str:
         chunks: list[str] = []
 
-        first = self.client.chat(model, context, options=options)
+        first = client.chat(model, context, options=options)
         first = self._sanitize_agent_response(first, agent_name)
         if not first:
             return ""
@@ -116,7 +138,7 @@ class ChatServerState:
                 {"role": "assistant", "content": merged},
                 {"role": "user", "content": "Продолжи с места остановки, без повторов."},
             ]
-            cont = self.client.chat(
+            cont = client.chat(
                 model,
                 continuation_messages,
                 options={
@@ -166,46 +188,114 @@ class ChatServerState:
         ]
         self.commentator_seen_count = 0
 
-    def rebuild_client(self) -> None:
-        host = self.host.strip()
-        timeout = float(self.timeout)
-        if self.provider == "openai":
-            self.client = OpenAICompatibleClient(host, api_key=self.api_key, token=self.token, timeout=timeout)
-        else:
-            self.client = OllamaClient(host, timeout=timeout)
+    def _build_client(self, config: ConnectionConfig) -> OllamaClient | OpenAICompatibleClient:
+        if config.provider == "openai":
+            return OpenAICompatibleClient(
+                config.host.strip(),
+                api_key=config.api_key,
+                token=config.token,
+                timeout=float(config.timeout),
+            )
+        return OllamaClient(config.host.strip(), timeout=float(config.timeout))
 
-    def refresh_models(self, raise_error: bool = True) -> list[str]:
-        self.rebuild_client()
+    def upsert_connection(
+        self,
+        connection_id: str,
+        provider: str,
+        host: str,
+        api_key: str,
+        token: str,
+        timeout: float,
+    ) -> None:
+        if not connection_id:
+            raise ValueError("Connection id is required")
+        if provider not in {"ollama", "openai"}:
+            raise ValueError("Provider must be one of: ollama, openai")
+        if timeout <= 0:
+            raise ValueError("Timeout must be positive")
+
+        with self.lock:
+            self.connections[connection_id] = ConnectionConfig(
+                connection_id=connection_id,
+                provider=provider,
+                host=host.strip(),
+                api_key=api_key,
+                token=token,
+                timeout=timeout,
+            )
+            self.models_by_connection.setdefault(connection_id, [])
+            self.clients.pop(connection_id, None)
+
+    def remove_connection(self, connection_id: str) -> None:
+        if connection_id == "default":
+            raise ValueError("Default connection cannot be removed")
+        with self.lock:
+            if connection_id not in self.connections:
+                raise ValueError(f"Connection '{connection_id}' not found")
+            if any(conn_id == connection_id for conn_id in self.agent_connections.values()):
+                raise ValueError("Connection is used by agents")
+            if self.commentator and self.commentator_connection_id == connection_id:
+                raise ValueError("Connection is used by commentator")
+            self.connections.pop(connection_id, None)
+            self.models_by_connection.pop(connection_id, None)
+            self.clients.pop(connection_id, None)
+
+    def refresh_models(self, connection_id: str, raise_error: bool = True) -> list[str]:
+        with self.lock:
+            config = self.connections.get(connection_id)
+        if not config:
+            raise ValueError(f"Connection '{connection_id}' not found")
+
+        client = self._build_client(config)
         try:
-            models = self.client.list_models()
+            models = client.list_models()
         except Exception as exc:  # noqa: BLE001
             with self.lock:
-                self.available_models = []
+                self.models_by_connection[connection_id] = []
                 self.last_error = str(exc)
-                self.status = "Ошибка подключения"
+                self.status = f"Ошибка подключения: {connection_id}"
             if raise_error:
                 raise
             return []
 
         with self.lock:
-            self.available_models = models
+            self.clients[connection_id] = client
+            self.models_by_connection[connection_id] = models
             self.last_error = ""
-            self.status = f"Подключено. Моделей: {len(models)}"
+            total_models = sum(len(items) for items in self.models_by_connection.values())
+            self.status = f"Подключено. Моделей: {total_models}"
         return models
 
-    def add_agent(self, name: str, model: str, system_prompt: str) -> None:
+    def _client_for_connection(self, connection_id: str) -> OllamaClient | OpenAICompatibleClient:
+        with self.lock:
+            config = self.connections.get(connection_id)
+            cached = self.clients.get(connection_id)
+        if not config:
+            raise RuntimeError(f"Connection '{connection_id}' not found")
+        if cached is not None:
+            return cached
+        client = self._build_client(config)
+        with self.lock:
+            self.clients[connection_id] = client
+        return client
+
+    def add_agent(self, name: str, model: str, system_prompt: str, connection_id: str) -> None:
         with self.lock:
             if not name:
                 raise ValueError("Agent name is required")
             if any(agent.name == name for agent in self.agents):
                 raise ValueError(f"Agent '{name}' already exists")
-            if model not in self.available_models:
-                raise ValueError("Choose a local model from the list")
+            if connection_id not in self.connections:
+                raise ValueError("Unknown connection")
+            available = self.models_by_connection.get(connection_id, [])
+            if model not in available:
+                raise ValueError("Choose a model from the selected connection")
             if not system_prompt.strip():
                 raise ValueError("System prompt cannot be empty")
 
             agent = Agent(name=name, model=model, system_prompt=system_prompt.strip())
             self.agents.append(agent)
+            self.agent_connections[name] = connection_id
             self.history.append(Message(speaker="Система", role="system", content=f"Подключен агент {name} <{model}>"))
             if self.running:
                 self._ensure_agent_context(agent)
@@ -218,6 +308,7 @@ class ChatServerState:
                 raise ValueError(f"Agent '{name}' not found")
             self.agent_contexts.pop(name, None)
             self.agent_seen_count.pop(name, None)
+            self.agent_connections.pop(name, None)
             self.history.append(Message(speaker="Система", role="system", content=f"Агент удален: {name}"))
 
     def add_user_message(self, text: str) -> None:
@@ -230,15 +321,19 @@ class ChatServerState:
         if should_comment:
             threading.Thread(target=self._run_commentator_step, daemon=True).start()
 
-    def set_commentator(self, name: str, model: str, system_prompt: str) -> None:
+    def set_commentator(self, name: str, model: str, system_prompt: str, connection_id: str) -> None:
         with self.lock:
             if not name:
                 raise ValueError("Commentator name is required")
-            if model not in self.available_models:
-                raise ValueError("Choose a local model from the list")
+            if connection_id not in self.connections:
+                raise ValueError("Unknown connection")
+            available = self.models_by_connection.get(connection_id, [])
+            if model not in available:
+                raise ValueError("Choose a model from the selected connection")
             if not system_prompt.strip():
                 raise ValueError("Commentator prompt cannot be empty")
             self.commentator = Agent(name=name, model=model, system_prompt=system_prompt.strip())
+            self.commentator_connection_id = connection_id
             self.commentator_context = []
             self.commentator_seen_count = 0
             self.commentator_history.append(
@@ -252,6 +347,7 @@ class ChatServerState:
                 raise ValueError("Commentator is not configured")
             old_name = self.commentator.name
             self.commentator = None
+            self.commentator_connection_id = "default"
             self.commentator_context = []
             self.commentator_seen_count = 0
             self.commentator_history.append(
@@ -330,9 +426,11 @@ class ChatServerState:
                     agent = agents_snapshot[self.current_agent_idx % len(agents_snapshot)]
                     self.current_agent_idx = (self.current_agent_idx + 1) % len(agents_snapshot)
                     self._ensure_agent_context(agent)
+                    connection_id = self.agent_connections.get(agent.name, "default")
                     self.status = f"Отвечает: {agent.name}<{agent.model}>"
 
                 try:
+                    client = self._client_for_connection(connection_id)
                     with self.lock:
                         context = self.agent_contexts[agent.name]
                         start_idx = self.agent_seen_count.get(agent.name, 0)
@@ -347,6 +445,7 @@ class ChatServerState:
                         context[:] = [context[0]] + context[-self.max_context_messages :]
 
                     response = self._chat_with_auto_continue(
+                        client=client,
                         agent_name=agent.name,
                         model=agent.model,
                         context=context,
@@ -397,6 +496,7 @@ class ChatServerState:
             if not commentator:
                 self.commentator_step_lock.release()
                 return
+            connection_id = self.commentator_connection_id
             self._ensure_commentator_context()
             source_unseen = self.history[self.commentator_seen_count :]
             self.commentator_seen_count = len(self.history)
@@ -417,7 +517,9 @@ class ChatServerState:
             context[:] = [context[0]] + context[-self.max_context_messages :]
 
         try:
+            client = self._client_for_connection(connection_id)
             final_response = self._chat_with_auto_continue(
+                client=client,
                 agent_name=commentator.name,
                 model=commentator.model,
                 context=context,
@@ -441,21 +543,54 @@ class ChatServerState:
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
+            default = self.connections.get("default")
+            total_models = sum(len(items) for items in self.models_by_connection.values())
             return {
-                "host": self.host,
-                "provider": self.provider,
-                "api_key": self.api_key,
-                "token": self.token,
-                "timeout": self.timeout,
+                "host": default.host if default else self.host,
+                "provider": default.provider if default else self.provider,
+                "api_key": default.api_key if default else self.api_key,
+                "token": default.token if default else self.token,
+                "timeout": default.timeout if default else self.timeout,
                 "delay": self.delay,
                 "running": self.running,
                 "status": self.status,
                 "last_error": self.last_error,
-                "models": list(self.available_models),
+                "models": list(self.models_by_connection.get("default", [])),
+                "models_by_connection": {k: list(v) for k, v in self.models_by_connection.items()},
+                "connections": [
+                    {
+                        "connection_id": cfg.connection_id,
+                        "provider": cfg.provider,
+                        "host": cfg.host,
+                        "api_key": cfg.api_key,
+                        "token": cfg.token,
+                        "timeout": cfg.timeout,
+                        "models_count": len(self.models_by_connection.get(cfg.connection_id, [])),
+                    }
+                    for cfg in self.connections.values()
+                ],
+                "models_total": total_models,
                 "prompts": dict(self.prompts),
-                "agents": [asdict(agent) for agent in self.agents],
+                "agents": [
+                    {
+                        "name": agent.name,
+                        "model": agent.model,
+                        "system_prompt": agent.system_prompt,
+                        "connection_id": self.agent_connections.get(agent.name, "default"),
+                    }
+                    for agent in self.agents
+                ],
                 "history": [asdict(message) for message in self.history[-300:]],
-                "commentator": asdict(self.commentator) if self.commentator else None,
+                "commentator": (
+                    {
+                        "name": self.commentator.name,
+                        "model": self.commentator.model,
+                        "system_prompt": self.commentator.system_prompt,
+                        "connection_id": self.commentator_connection_id,
+                    }
+                    if self.commentator
+                    else None
+                ),
                 "commentator_history": [asdict(message) for message in self.commentator_history[-300:]],
             }
 
@@ -491,15 +626,13 @@ def get_prompts(request: Request[Any, Any, Any]) -> dict[str, str]:
 def update_config(data: dict[str, Any], request: Request[Any, Any, Any]) -> dict[str, Any]:
     state = _state(request)
 
+    connection_id = str(data.get("connection_id", "default")).strip() or "default"
     host = str(data.get("host", state.host)).strip()
     provider = str(data.get("provider", state.provider)).strip().lower()
     api_key = str(data.get("api_key", state.api_key))
     token = str(data.get("token", state.token))
     timeout_raw = data.get("timeout", state.timeout)
     delay_raw = data.get("delay", state.delay)
-
-    if provider not in {"ollama", "openai"}:
-        raise _bad_request("Provider must be one of: ollama, openai")
 
     try:
         timeout = float(timeout_raw)
@@ -509,23 +642,80 @@ def update_config(data: dict[str, Any], request: Request[Any, Any, Any]) -> dict
     except (TypeError, ValueError) as exc:
         raise _bad_request("Timeout must be positive, delay must be a number") from exc
 
+    try:
+        state.upsert_connection(
+            connection_id=connection_id,
+            provider=provider,
+            host=host,
+            api_key=api_key,
+            token=token,
+            timeout=timeout,
+        )
+    except ValueError as exc:
+        raise _bad_request(str(exc)) from exc
+
     with state.lock:
-        state.provider = provider
-        state.host = host
-        state.api_key = api_key
-        state.token = token
-        state.timeout = timeout
         state.delay = delay
 
-    state.refresh_models(raise_error=True)
+    state.refresh_models(connection_id=connection_id, raise_error=True)
     return state.snapshot()
 
 
 @get("/api/models", sync_to_thread=True)
 def refresh_models(request: Request[Any, Any, Any]) -> dict[str, Any]:
     state = _state(request)
-    models = state.refresh_models(raise_error=True)
-    return {"models": models}
+    models = state.refresh_models(connection_id="default", raise_error=True)
+    return {"models": models, "connection_id": "default"}
+
+
+@get("/api/models/{connection_id:str}", sync_to_thread=True)
+def refresh_models_for_connection(connection_id: str, request: Request[Any, Any, Any]) -> dict[str, Any]:
+    state = _state(request)
+    try:
+        models = state.refresh_models(connection_id=connection_id, raise_error=True)
+    except ValueError as exc:
+        raise _bad_request(str(exc)) from exc
+    return {"models": models, "connection_id": connection_id}
+
+
+@post("/api/connections", sync_to_thread=True)
+def upsert_connection(data: dict[str, Any], request: Request[Any, Any, Any]) -> dict[str, Any]:
+    state = _state(request)
+    connection_id = str(data.get("connection_id", "")).strip()
+    provider = str(data.get("provider", "ollama")).strip().lower()
+    host = str(data.get("host", "")).strip()
+    api_key = str(data.get("api_key", ""))
+    token = str(data.get("token", ""))
+    try:
+        timeout = float(data.get("timeout", 45))
+        if timeout <= 0:
+            raise ValueError
+    except (TypeError, ValueError) as exc:
+        raise _bad_request("Timeout must be positive") from exc
+
+    try:
+        state.upsert_connection(
+            connection_id=connection_id,
+            provider=provider,
+            host=host,
+            api_key=api_key,
+            token=token,
+            timeout=timeout,
+        )
+    except ValueError as exc:
+        raise _bad_request(str(exc)) from exc
+    state.refresh_models(connection_id=connection_id, raise_error=True)
+    return state.snapshot()
+
+
+@delete("/api/connections/{connection_id:str}", status_code=200, sync_to_thread=True)
+def delete_connection(connection_id: str, request: Request[Any, Any, Any]) -> dict[str, Any]:
+    state = _state(request)
+    try:
+        state.remove_connection(connection_id)
+    except ValueError as exc:
+        raise _bad_request(str(exc)) from exc
+    return state.snapshot()
 
 
 @post("/api/agents", sync_to_thread=True)
@@ -536,6 +726,7 @@ def add_agent(data: dict[str, Any], request: Request[Any, Any, Any]) -> dict[str
             name=str(data.get("name", "")).strip(),
             model=str(data.get("model", "")).strip(),
             system_prompt=str(data.get("system_prompt", "")).strip(),
+            connection_id=str(data.get("connection_id", "default")).strip() or "default",
         )
     except ValueError as exc:
         raise _bad_request(str(exc)) from exc
@@ -570,6 +761,7 @@ def set_commentator(data: dict[str, Any], request: Request[Any, Any, Any]) -> di
             name=str(data.get("name", "")).strip(),
             model=str(data.get("model", "")).strip(),
             system_prompt=str(data.get("system_prompt", "")).strip(),
+            connection_id=str(data.get("connection_id", "default")).strip() or "default",
         )
     except ValueError as exc:
         raise _bad_request(str(exc)) from exc
@@ -624,6 +816,9 @@ app = Litestar(
         get_prompts,
         update_config,
         refresh_models,
+        refresh_models_for_connection,
+        upsert_connection,
+        delete_connection,
         add_agent,
         remove_agent,
         add_message,

@@ -1,29 +1,38 @@
 const statusEl = document.getElementById("status");
-const providerEl = document.getElementById("provider");
-const hostEl = document.getElementById("host");
-const apiKeyEl = document.getElementById("apiKey");
-const tokenEl = document.getElementById("token");
-const timeoutEl = document.getElementById("timeout");
+
+const ollamaHostEl = document.getElementById("ollamaHost");
+const ollamaTimeoutEl = document.getElementById("ollamaTimeout");
+const openaiHostEl = document.getElementById("openaiHost");
+const openaiApiKeyEl = document.getElementById("openaiApiKey");
+const openaiTokenEl = document.getElementById("openaiToken");
+const openaiTimeoutEl = document.getElementById("openaiTimeout");
 const delayEl = document.getElementById("delay");
+
 const agentsEl = document.getElementById("agents");
 const agentNameEl = document.getElementById("agentName");
+const agentConnectionEl = document.getElementById("agentConnection");
 const agentModelEl = document.getElementById("agentModel");
 const promptPresetEl = document.getElementById("promptPreset");
 const systemPromptEl = document.getElementById("systemPrompt");
-const historyEl = document.getElementById("history");
-const commentatorHistoryEl = document.getElementById("commentatorHistory");
-const userTextEl = document.getElementById("userText");
+
 const commentatorStatusEl = document.getElementById("commentatorStatus");
 const commentatorNameEl = document.getElementById("commentatorName");
+const commentatorConnectionEl = document.getElementById("commentatorConnection");
 const commentatorModelEl = document.getElementById("commentatorModel");
 const commentatorPresetEl = document.getElementById("commentatorPreset");
 const commentatorPromptEl = document.getElementById("commentatorPrompt");
 
+const historyEl = document.getElementById("history");
+const commentatorHistoryEl = document.getElementById("commentatorHistory");
+const userTextEl = document.getElementById("userText");
+
 let selectedAgent = "";
 let state = null;
-let configDirty = false;
 let systemPromptDirty = false;
 let commentatorDirty = false;
+let ollamaDirty = false;
+let openaiDirty = false;
+let delayDirty = false;
 
 async function api(path, method = "GET", body = null) {
   const response = await fetch(path, {
@@ -31,7 +40,6 @@ async function api(path, method = "GET", body = null) {
     headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : null,
   });
-
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(payload.detail || payload.message || `HTTP ${response.status}`);
@@ -44,7 +52,7 @@ function setStatus(text) {
 }
 
 function escapeHtml(value) {
-  return value
+  return String(value)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
@@ -53,7 +61,7 @@ function escapeHtml(value) {
 }
 
 function renderMessageContent(value) {
-  const escaped = escapeHtml(value);
+  const escaped = escapeHtml(value || "");
   return escaped
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/\*(.+?)\*/g, "<em>$1</em>")
@@ -81,29 +89,78 @@ function renderHistory(container, messages) {
   }
 }
 
+function findConnection(connectionId) {
+  return (state?.connections || []).find((c) => c.connection_id === connectionId) || null;
+}
+
+function connectionModels(connectionId) {
+  if (!state?.models_by_connection) {
+    return [];
+  }
+  return state.models_by_connection[connectionId] || [];
+}
+
+function renderModelsForSelect(selectEl, connectionId) {
+  const models = connectionModels(connectionId);
+  const current = selectEl.value;
+  selectEl.innerHTML = models.map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join("");
+  if (current && models.includes(current)) {
+    selectEl.value = current;
+  } else if (models.length > 0) {
+    selectEl.value = models[0];
+  }
+}
+
+function renderConnectionSelects() {
+  const options = (state?.connections || [])
+    .map((conn) => `<option value="${escapeHtml(conn.connection_id)}">${escapeHtml(conn.connection_id)} (${escapeHtml(conn.provider)})</option>`)
+    .join("");
+
+  const prevAgentConn = agentConnectionEl.value;
+  const prevCommentConn = commentatorConnectionEl.value;
+
+  agentConnectionEl.innerHTML = options;
+  commentatorConnectionEl.innerHTML = options;
+
+  const connIds = (state?.connections || []).map((c) => c.connection_id);
+  agentConnectionEl.value = connIds.includes(prevAgentConn) ? prevAgentConn : (connIds[0] || "default");
+  commentatorConnectionEl.value = connIds.includes(prevCommentConn) ? prevCommentConn : (connIds[0] || "default");
+}
+
+function syncConnectionEditors() {
+  const ollama = findConnection("ollama") || findConnection("default");
+  const openai = findConnection("openai");
+
+  if (ollama && !ollamaDirty) {
+    ollamaHostEl.value = ollama.host || "";
+    ollamaTimeoutEl.value = ollama.timeout || 45;
+  }
+
+  if (openai && !openaiDirty) {
+    openaiHostEl.value = openai.host || "";
+    openaiApiKeyEl.value = openai.api_key || "";
+    openaiTokenEl.value = openai.token || "";
+    openaiTimeoutEl.value = openai.timeout || 45;
+  }
+}
+
 function renderState(nextState) {
   state = nextState;
-  if (!configDirty) {
-    providerEl.value = state.provider || "ollama";
-    hostEl.value = state.host || hostEl.value;
-    apiKeyEl.value = state.api_key || "";
-    tokenEl.value = state.token || "";
-    timeoutEl.value = state.timeout;
-    delayEl.value = state.delay;
-  }
   setStatus(state.status || "");
 
-  const models = state.models || [];
-  const currentModel = agentModelEl.value;
-  agentModelEl.innerHTML = models.map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join("");
-  if (currentModel && models.includes(currentModel)) {
-    agentModelEl.value = currentModel;
-  } else if (models.length > 0) {
-    agentModelEl.value = models[0];
+  if (!delayDirty) {
+    delayEl.value = state.delay;
   }
+
+  renderConnectionSelects();
+  syncConnectionEditors();
+
+  renderModelsForSelect(agentModelEl, agentConnectionEl.value || "default");
+  renderModelsForSelect(commentatorModelEl, commentatorConnectionEl.value || "default");
 
   const prompts = state.prompts || {};
   const promptKeys = Object.keys(prompts);
+
   const currentPreset = promptPresetEl.value;
   promptPresetEl.innerHTML = promptKeys.map((key) => `<option value="${escapeHtml(key)}">${escapeHtml(key)}</option>`).join("");
   if (currentPreset && promptKeys.includes(currentPreset)) {
@@ -114,13 +171,7 @@ function renderState(nextState) {
   if (!systemPromptDirty && promptPresetEl.value) {
     systemPromptEl.value = prompts[promptPresetEl.value] || "";
   }
-  const currentCommentatorModel = commentatorModelEl.value;
-  commentatorModelEl.innerHTML = models.map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join("");
-  if (currentCommentatorModel && models.includes(currentCommentatorModel)) {
-    commentatorModelEl.value = currentCommentatorModel;
-  } else if (models.length > 0) {
-    commentatorModelEl.value = models[0];
-  }
+
   const currentCommentatorPreset = commentatorPresetEl.value;
   commentatorPresetEl.innerHTML = promptKeys.map((key) => `<option value="${escapeHtml(key)}">${escapeHtml(key)}</option>`).join("");
   if (currentCommentatorPreset && promptKeys.includes(currentCommentatorPreset)) {
@@ -135,7 +186,8 @@ function renderState(nextState) {
   agentsEl.innerHTML = (state.agents || [])
     .map((agent) => {
       const active = agent.name === selectedAgent ? "active" : "";
-      return `<li data-name="${escapeHtml(agent.name)}" class="${active}">${escapeHtml(agent.name)} &lt;${escapeHtml(agent.model)}&gt;</li>`;
+      const suffix = agent.connection_id ? ` @${agent.connection_id}` : "";
+      return `<li data-name="${escapeHtml(agent.name)}" class="${active}">${escapeHtml(agent.name)} &lt;${escapeHtml(agent.model)}&gt;${escapeHtml(suffix)}</li>`;
     })
     .join("");
 
@@ -147,9 +199,11 @@ function renderState(nextState) {
   renderHistory(commentatorHistoryEl, state.commentator_history || []);
 
   if (state.commentator) {
-    commentatorStatusEl.textContent = `Подключен: ${state.commentator.name} <${state.commentator.model}>`;
+    commentatorStatusEl.textContent = `Подключен: ${state.commentator.name} <${state.commentator.model}> @${state.commentator.connection_id}`;
     if (!commentatorDirty) {
       commentatorNameEl.value = state.commentator.name || commentatorNameEl.value;
+      commentatorConnectionEl.value = state.commentator.connection_id || commentatorConnectionEl.value;
+      renderModelsForSelect(commentatorModelEl, commentatorConnectionEl.value || "default");
       commentatorModelEl.value = state.commentator.model || commentatorModelEl.value;
       commentatorPromptEl.value = state.commentator.system_prompt || commentatorPromptEl.value;
     }
@@ -175,25 +229,55 @@ async function safeAction(handler) {
   }
 }
 
+async function saveConnection(connectionId, provider, host, apiKey, token, timeout) {
+  const payload = await api("/api/config", "POST", {
+    connection_id: connectionId,
+    provider,
+    host,
+    api_key: apiKey,
+    token,
+    timeout: Number(timeout),
+    delay: Number(delayEl.value),
+  });
+  renderState(payload);
+}
+
 function setupEvents() {
-  document.getElementById("saveConfig").addEventListener("click", () =>
+  document.getElementById("saveOllama").addEventListener("click", () =>
     safeAction(async () => {
-      const payload = await api("/api/config", "POST", {
-        provider: providerEl.value,
-        host: hostEl.value,
-        api_key: apiKeyEl.value,
-        token: tokenEl.value,
-        timeout: Number(timeoutEl.value),
-        delay: Number(delayEl.value),
-      });
-      configDirty = false;
-      renderState(payload);
+      await saveConnection("ollama", "ollama", ollamaHostEl.value, "", "", ollamaTimeoutEl.value);
+      ollamaDirty = false;
+      delayDirty = false;
+      await loadState();
     }),
   );
 
-  document.getElementById("refreshModels").addEventListener("click", () =>
+  document.getElementById("refreshOllama").addEventListener("click", () =>
     safeAction(async () => {
-      await api("/api/models");
+      await api("/api/models/ollama");
+      await loadState();
+    }),
+  );
+
+  document.getElementById("saveOpenai").addEventListener("click", () =>
+    safeAction(async () => {
+      await saveConnection("openai", "openai", openaiHostEl.value, openaiApiKeyEl.value, openaiTokenEl.value, openaiTimeoutEl.value);
+      openaiDirty = false;
+      delayDirty = false;
+      await loadState();
+    }),
+  );
+
+  document.getElementById("refreshOpenai").addEventListener("click", () =>
+    safeAction(async () => {
+      await api("/api/models/openai");
+      await loadState();
+    }),
+  );
+
+  document.getElementById("deleteOpenai").addEventListener("click", () =>
+    safeAction(async () => {
+      await api("/api/connections/openai", "DELETE");
       await loadState();
     }),
   );
@@ -202,6 +286,7 @@ function setupEvents() {
     safeAction(async () => {
       await api("/api/agents", "POST", {
         name: agentNameEl.value.trim(),
+        connection_id: agentConnectionEl.value,
         model: agentModelEl.value,
         system_prompt: systemPromptEl.value,
       });
@@ -215,6 +300,7 @@ function setupEvents() {
     safeAction(async () => {
       const payload = await api("/api/commentator", "POST", {
         name: commentatorNameEl.value.trim(),
+        connection_id: commentatorConnectionEl.value,
         model: commentatorModelEl.value,
         system_prompt: commentatorPromptEl.value,
       });
@@ -283,13 +369,23 @@ function setupEvents() {
     systemPromptEl.value = state.prompts[key];
     systemPromptDirty = false;
   });
+
   commentatorPresetEl.addEventListener("change", () => {
     const key = commentatorPresetEl.value;
     if (!state?.prompts || !state.prompts[key]) {
       return;
     }
     commentatorPromptEl.value = state.prompts[key];
-    commentatorDirty = false;
+    commentatorDirty = true;
+  });
+
+  agentConnectionEl.addEventListener("change", () => {
+    renderModelsForSelect(agentModelEl, agentConnectionEl.value || "default");
+  });
+
+  commentatorConnectionEl.addEventListener("change", () => {
+    commentatorDirty = true;
+    renderModelsForSelect(commentatorModelEl, commentatorConnectionEl.value || "default");
   });
 
   agentsEl.addEventListener("click", (event) => {
@@ -308,24 +404,28 @@ function setupEvents() {
     }
   });
 
-  providerEl.addEventListener("change", () => {
-    configDirty = true;
+  ollamaHostEl.addEventListener("input", () => {
+    ollamaDirty = true;
   });
-  hostEl.addEventListener("input", () => {
-    configDirty = true;
+  ollamaTimeoutEl.addEventListener("input", () => {
+    ollamaDirty = true;
   });
-  apiKeyEl.addEventListener("input", () => {
-    configDirty = true;
+  openaiHostEl.addEventListener("input", () => {
+    openaiDirty = true;
   });
-  tokenEl.addEventListener("input", () => {
-    configDirty = true;
+  openaiApiKeyEl.addEventListener("input", () => {
+    openaiDirty = true;
   });
-  timeoutEl.addEventListener("input", () => {
-    configDirty = true;
+  openaiTokenEl.addEventListener("input", () => {
+    openaiDirty = true;
+  });
+  openaiTimeoutEl.addEventListener("input", () => {
+    openaiDirty = true;
   });
   delayEl.addEventListener("input", () => {
-    configDirty = true;
+    delayDirty = true;
   });
+
   systemPromptEl.addEventListener("input", () => {
     systemPromptDirty = true;
   });

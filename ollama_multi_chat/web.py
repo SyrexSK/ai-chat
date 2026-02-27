@@ -31,6 +31,8 @@ class ChatServerState:
         self.available_models: list[str] = []
         self.agents: list[Agent] = []
         self.history: list[Message] = []
+        self.commentator: Agent | None = None
+        self.commentator_history: list[Message] = []
 
         self.running = False
         self.stop_requested = False
@@ -44,6 +46,8 @@ class ChatServerState:
         self.agent_seen_count: dict[str, int] = {}
         self.current_agent_idx = 0
         self.max_context_messages = 60
+        self.commentator_context: list[dict[str, str]] = []
+        self.commentator_seen_count = 0
 
         self.refresh_models(raise_error=False)
 
@@ -76,6 +80,12 @@ class ChatServerState:
         cleaned = re.sub(r"^\s*```\s*$", "", cleaned, flags=re.IGNORECASE)
         return cleaned.strip()
 
+    def _looks_truncated(self, text: str) -> bool:
+        stripped = text.strip()
+        if len(stripped) < 60:
+            return False
+        return not stripped.endswith((".", "!", "?", "…", '"', "'", "»", ")", "]"))
+
     def _ensure_agent_context(self, agent: Agent) -> None:
         if agent.name in self.agent_contexts:
             return
@@ -90,6 +100,25 @@ class ChatServerState:
             }
         ]
         self.agent_seen_count[agent.name] = 0
+
+    def _ensure_commentator_context(self) -> None:
+        if not self.commentator:
+            return
+        if self.commentator_context:
+            return
+        self.commentator_context = [
+            {
+                "role": "system",
+                "content": (
+                    f"Твоя роль: {self.commentator.name}. "
+                    "Ты наблюдатель в отдельном канале комментариев. "
+                    "Читай основной диалог и давай короткие аналитические комментарии по сути, "
+                    "без участия в основном споре. Пиши на русском языке. "
+                    f"Следуй этой инструкции:\n{self.commentator.system_prompt.strip()}"
+                ),
+            }
+        ]
+        self.commentator_seen_count = 0
 
     def rebuild_client(self) -> None:
         self.client = OllamaClient(self.host.strip(), timeout=float(self.timeout))
@@ -147,13 +176,44 @@ class ChatServerState:
         with self.lock:
             self.history.append(Message(speaker="Вы", role="user", content=msg))
 
+    def set_commentator(self, name: str, model: str, system_prompt: str) -> None:
+        with self.lock:
+            if not name:
+                raise ValueError("Commentator name is required")
+            if model not in self.available_models:
+                raise ValueError("Choose a local model from the list")
+            if not system_prompt.strip():
+                raise ValueError("Commentator prompt cannot be empty")
+            self.commentator = Agent(name=name, model=model, system_prompt=system_prompt.strip())
+            self.commentator_context = []
+            self.commentator_seen_count = 0
+            self.commentator_history.append(
+                Message(speaker="Система", role="system", content=f"Подключен комментатор {name} <{model}>")
+            )
+            self._ensure_commentator_context()
+
+    def clear_commentator(self) -> None:
+        with self.lock:
+            if not self.commentator:
+                raise ValueError("Commentator is not configured")
+            old_name = self.commentator.name
+            self.commentator = None
+            self.commentator_context = []
+            self.commentator_seen_count = 0
+            self.commentator_history.append(
+                Message(speaker="Система", role="system", content=f"Комментатор отключен: {old_name}")
+            )
+
     def reset_chat(self) -> None:
         with self.lock:
             if self.running:
                 raise RuntimeError("Сначала остановите чат")
             self.history.clear()
+            self.commentator_history.clear()
             self.agent_contexts.clear()
             self.agent_seen_count.clear()
+            self.commentator_context.clear()
+            self.commentator_seen_count = 0
             self.status = "Чат сброшен"
             self.last_error = ""
 
@@ -172,6 +232,7 @@ class ChatServerState:
             self.agent_seen_count.clear()
             for agent in self.agents:
                 self._ensure_agent_context(agent)
+            self._ensure_commentator_context()
 
             if not self.history:
                 self.history.append(
@@ -260,6 +321,8 @@ class ChatServerState:
                         self.status = "Ошибка в ходе ответа агента"
                         self.last_error = str(exc)
 
+                self._run_commentator_step()
+
                 for _ in range(max(1, int(delay / 0.1))):
                     with self.lock:
                         if self.stop_requested:
@@ -270,6 +333,70 @@ class ChatServerState:
                 self.running = False
                 if self.status.startswith("Остановка"):
                     self.status = "Остановлено"
+
+    def _run_commentator_step(self) -> None:
+        with self.lock:
+            commentator = self.commentator
+            if not commentator:
+                return
+            self._ensure_commentator_context()
+            source_unseen = self.history[self.commentator_seen_count :]
+            self.commentator_seen_count = len(self.history)
+            context = self.commentator_context
+
+        if not source_unseen:
+            return
+
+        summary_lines = [f"{item.speaker}: {item.content}" for item in source_unseen[-8:]]
+        user_turn = (
+            "Новые сообщения в основном чате:\n"
+            + "\n".join(summary_lines)
+            + "\n\nДай короткий комментарий (1-4 абзаца), что важно в этом фрагменте."
+        )
+        context.append({"role": "user", "content": user_turn})
+        if len(context) > self.max_context_messages + 1:
+            context[:] = [context[0]] + context[-self.max_context_messages :]
+
+        try:
+            chunks: list[str] = []
+
+            response = self.client.chat(
+                commentator.model,
+                context,
+                options={"num_predict": 420, "temperature": 0.5, "repeat_penalty": 1.1},
+            )
+            response = self._sanitize_agent_response(response, commentator.name)
+            if not response:
+                return
+            chunks.append(response)
+
+            # If reply looks cut off, request continuation up to 2 times and merge.
+            for _ in range(2):
+                merged = "\n".join(chunks).strip()
+                if not self._looks_truncated(merged):
+                    break
+                context.append({"role": "assistant", "content": merged})
+                cont = self.client.chat(
+                    commentator.model,
+                    context + [{"role": "user", "content": "Продолжи с места остановки, без повторов."}],
+                    options={"num_predict": 260, "temperature": 0.4, "repeat_penalty": 1.1},
+                )
+                cont = self._sanitize_agent_response(cont, commentator.name)
+                if not cont:
+                    break
+                chunks.append(cont)
+
+            final_response = "\n".join(chunks).strip()
+            context.append({"role": "assistant", "content": final_response})
+            with self.lock:
+                self.commentator_history.append(
+                    Message(speaker=commentator.name, role="assistant", content=final_response)
+                )
+        except Exception as exc:  # noqa: BLE001
+            with self.lock:
+                self.commentator_history.append(
+                    Message(speaker=f"{commentator.name}<{commentator.model}>", role="error", content=str(exc))
+                )
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -284,6 +411,8 @@ class ChatServerState:
                 "prompts": dict(self.prompts),
                 "agents": [asdict(agent) for agent in self.agents],
                 "history": [asdict(message) for message in self.history[-300:]],
+                "commentator": asdict(self.commentator) if self.commentator else None,
+                "commentator_history": [asdict(message) for message in self.commentator_history[-300:]],
             }
 
 
@@ -380,6 +509,30 @@ def add_message(data: dict[str, Any], request: Request[Any, Any, Any]) -> dict[s
     return state.snapshot()
 
 
+@post("/api/commentator", sync_to_thread=True)
+def set_commentator(data: dict[str, Any], request: Request[Any, Any, Any]) -> dict[str, Any]:
+    state = _state(request)
+    try:
+        state.set_commentator(
+            name=str(data.get("name", "")).strip(),
+            model=str(data.get("model", "")).strip(),
+            system_prompt=str(data.get("system_prompt", "")).strip(),
+        )
+    except ValueError as exc:
+        raise _bad_request(str(exc)) from exc
+    return state.snapshot()
+
+
+@delete("/api/commentator", status_code=200, sync_to_thread=True)
+def clear_commentator(request: Request[Any, Any, Any]) -> dict[str, Any]:
+    state = _state(request)
+    try:
+        state.clear_commentator()
+    except ValueError as exc:
+        raise _bad_request(str(exc)) from exc
+    return state.snapshot()
+
+
 @post("/api/chat/start", sync_to_thread=True)
 def start_chat(request: Request[Any, Any, Any]) -> dict[str, Any]:
     state = _state(request)
@@ -421,6 +574,8 @@ app = Litestar(
         add_agent,
         remove_agent,
         add_message,
+        set_commentator,
+        clear_commentator,
         start_chat,
         stop_chat,
         reset_chat,

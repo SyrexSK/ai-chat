@@ -1,4 +1,4 @@
-from ollama_multi_chat.gui import main
+from ollama_multi_chat.web import main
 
 
 if __name__ == "__main__":

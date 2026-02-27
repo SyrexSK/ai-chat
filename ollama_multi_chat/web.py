@@ -12,7 +12,7 @@ from litestar.exceptions import ClientException
 from litestar.response import File
 from litestar.static_files import StaticFilesConfig
 
-from ollama_multi_chat.core import Agent, Message, OllamaClient, load_system_prompts
+from ollama_multi_chat.core import Agent, Message, OllamaClient, OpenAICompatibleClient, load_system_prompts
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -21,12 +21,16 @@ STATIC_DIR = Path(__file__).parent / "static"
 @dataclass
 class ChatServerState:
     prompts_path: Path
+    provider: str = "ollama"
     host: str = "http://127.0.0.1:11434"
+    api_key: str = ""
+    token: str = ""
     timeout: float = 45.0
     delay: float = 2.0
 
     def __post_init__(self) -> None:
         self.prompts = load_system_prompts(self.prompts_path)
+        self.client: OllamaClient | OpenAICompatibleClient
         self.client = OllamaClient(self.host, timeout=self.timeout)
         self.available_models: list[str] = []
         self.agents: list[Agent] = []
@@ -40,6 +44,7 @@ class ChatServerState:
         self.last_error = ""
 
         self.lock = threading.RLock()
+        self.commentator_step_lock = threading.Lock()
         self.worker_thread: threading.Thread | None = None
 
         self.agent_contexts: dict[str, list[dict[str, str]]] = {}
@@ -86,6 +91,47 @@ class ChatServerState:
             return False
         return not stripped.endswith((".", "!", "?", "…", '"', "'", "»", ")", "]"))
 
+    def _chat_with_auto_continue(
+        self,
+        *,
+        agent_name: str,
+        model: str,
+        context: list[dict[str, str]],
+        options: dict[str, Any],
+        max_continuations: int = 2,
+    ) -> str:
+        chunks: list[str] = []
+
+        first = self.client.chat(model, context, options=options)
+        first = self._sanitize_agent_response(first, agent_name)
+        if not first:
+            return ""
+        chunks.append(first)
+
+        for _ in range(max_continuations):
+            merged = "\n".join(chunks).strip()
+            if not self._looks_truncated(merged):
+                break
+            continuation_messages = context + [
+                {"role": "assistant", "content": merged},
+                {"role": "user", "content": "Продолжи с места остановки, без повторов."},
+            ]
+            cont = self.client.chat(
+                model,
+                continuation_messages,
+                options={
+                    "num_predict": min(600, int(options.get("num_predict", 512))),
+                    "temperature": max(0.2, float(options.get("temperature", 0.7)) - 0.2),
+                    "repeat_penalty": float(options.get("repeat_penalty", 1.2)),
+                },
+            )
+            cont = self._sanitize_agent_response(cont, agent_name)
+            if not cont:
+                break
+            chunks.append(cont)
+
+        return "\n".join(chunks).strip()
+
     def _ensure_agent_context(self, agent: Agent) -> None:
         if agent.name in self.agent_contexts:
             return
@@ -121,7 +167,12 @@ class ChatServerState:
         self.commentator_seen_count = 0
 
     def rebuild_client(self) -> None:
-        self.client = OllamaClient(self.host.strip(), timeout=float(self.timeout))
+        host = self.host.strip()
+        timeout = float(self.timeout)
+        if self.provider == "openai":
+            self.client = OpenAICompatibleClient(host, api_key=self.api_key, token=self.token, timeout=timeout)
+        else:
+            self.client = OllamaClient(host, timeout=timeout)
 
     def refresh_models(self, raise_error: bool = True) -> list[str]:
         self.rebuild_client()
@@ -175,6 +226,9 @@ class ChatServerState:
             raise ValueError("Message cannot be empty")
         with self.lock:
             self.history.append(Message(speaker="Вы", role="user", content=msg))
+            should_comment = self.commentator is not None
+        if should_comment:
+            threading.Thread(target=self._run_commentator_step, daemon=True).start()
 
     def set_commentator(self, name: str, model: str, system_prompt: str) -> None:
         with self.lock:
@@ -292,12 +346,13 @@ class ChatServerState:
                     if len(context) > self.max_context_messages + 1:
                         context[:] = [context[0]] + context[-self.max_context_messages :]
 
-                    response = self.client.chat(
-                        agent.model,
-                        context,
-                        options={"num_predict": 512, "temperature": 0.7, "repeat_penalty": 1.2},
+                    response = self._chat_with_auto_continue(
+                        agent_name=agent.name,
+                        model=agent.model,
+                        context=context,
+                        options={"num_predict": 900, "temperature": 0.7, "repeat_penalty": 1.2},
+                        max_continuations=2,
                     )
-                    response = self._sanitize_agent_response(response, agent.name)
 
                     if not response:
                         with self.lock:
@@ -335,9 +390,12 @@ class ChatServerState:
                     self.status = "Остановлено"
 
     def _run_commentator_step(self) -> None:
+        if not self.commentator_step_lock.acquire(blocking=False):
+            return
         with self.lock:
             commentator = self.commentator
             if not commentator:
+                self.commentator_step_lock.release()
                 return
             self._ensure_commentator_context()
             source_unseen = self.history[self.commentator_seen_count :]
@@ -345,6 +403,7 @@ class ChatServerState:
             context = self.commentator_context
 
         if not source_unseen:
+            self.commentator_step_lock.release()
             return
 
         summary_lines = [f"{item.speaker}: {item.content}" for item in source_unseen[-8:]]
@@ -358,35 +417,15 @@ class ChatServerState:
             context[:] = [context[0]] + context[-self.max_context_messages :]
 
         try:
-            chunks: list[str] = []
-
-            response = self.client.chat(
-                commentator.model,
-                context,
-                options={"num_predict": 420, "temperature": 0.5, "repeat_penalty": 1.1},
+            final_response = self._chat_with_auto_continue(
+                agent_name=commentator.name,
+                model=commentator.model,
+                context=context,
+                options={"num_predict": 600, "temperature": 0.5, "repeat_penalty": 1.1},
+                max_continuations=2,
             )
-            response = self._sanitize_agent_response(response, commentator.name)
-            if not response:
+            if not final_response:
                 return
-            chunks.append(response)
-
-            # If reply looks cut off, request continuation up to 2 times and merge.
-            for _ in range(2):
-                merged = "\n".join(chunks).strip()
-                if not self._looks_truncated(merged):
-                    break
-                context.append({"role": "assistant", "content": merged})
-                cont = self.client.chat(
-                    commentator.model,
-                    context + [{"role": "user", "content": "Продолжи с места остановки, без повторов."}],
-                    options={"num_predict": 260, "temperature": 0.4, "repeat_penalty": 1.1},
-                )
-                cont = self._sanitize_agent_response(cont, commentator.name)
-                if not cont:
-                    break
-                chunks.append(cont)
-
-            final_response = "\n".join(chunks).strip()
             context.append({"role": "assistant", "content": final_response})
             with self.lock:
                 self.commentator_history.append(
@@ -397,11 +436,16 @@ class ChatServerState:
                 self.commentator_history.append(
                     Message(speaker=f"{commentator.name}<{commentator.model}>", role="error", content=str(exc))
                 )
+        finally:
+            self.commentator_step_lock.release()
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             return {
                 "host": self.host,
+                "provider": self.provider,
+                "api_key": self.api_key,
+                "token": self.token,
                 "timeout": self.timeout,
                 "delay": self.delay,
                 "running": self.running,
@@ -448,8 +492,14 @@ def update_config(data: dict[str, Any], request: Request[Any, Any, Any]) -> dict
     state = _state(request)
 
     host = str(data.get("host", state.host)).strip()
+    provider = str(data.get("provider", state.provider)).strip().lower()
+    api_key = str(data.get("api_key", state.api_key))
+    token = str(data.get("token", state.token))
     timeout_raw = data.get("timeout", state.timeout)
     delay_raw = data.get("delay", state.delay)
+
+    if provider not in {"ollama", "openai"}:
+        raise _bad_request("Provider must be one of: ollama, openai")
 
     try:
         timeout = float(timeout_raw)
@@ -460,7 +510,10 @@ def update_config(data: dict[str, Any], request: Request[Any, Any, Any]) -> dict
         raise _bad_request("Timeout must be positive, delay must be a number") from exc
 
     with state.lock:
+        state.provider = provider
         state.host = host
+        state.api_key = api_key
+        state.token = token
         state.timeout = timeout
         state.delay = delay
 

@@ -13,6 +13,7 @@ const userTextEl = document.getElementById("userText");
 let selectedAgent = "";
 let state = null;
 let configDirty = false;
+let systemPromptDirty = false;
 
 async function api(path, method = "GET", body = null) {
   const response = await fetch(path, {
@@ -64,13 +65,21 @@ function renderState(nextState) {
   agentModelEl.innerHTML = models.map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join("");
   if (currentModel && models.includes(currentModel)) {
     agentModelEl.value = currentModel;
+  } else if (models.length > 0) {
+    agentModelEl.value = models[0];
   }
 
   const prompts = state.prompts || {};
   const promptKeys = Object.keys(prompts);
+  const currentPreset = promptPresetEl.value;
   promptPresetEl.innerHTML = promptKeys.map((key) => `<option value="${escapeHtml(key)}">${escapeHtml(key)}</option>`).join("");
-  if (!systemPromptEl.value && promptKeys.length > 0) {
-    systemPromptEl.value = prompts[promptKeys[0]];
+  if (currentPreset && promptKeys.includes(currentPreset)) {
+    promptPresetEl.value = currentPreset;
+  } else if (promptKeys.length > 0) {
+    promptPresetEl.value = promptKeys[0];
+  }
+  if (!systemPromptDirty && promptPresetEl.value) {
+    systemPromptEl.value = prompts[promptPresetEl.value] || "";
   }
 
   agentsEl.innerHTML = (state.agents || [])
@@ -148,6 +157,7 @@ function setupEvents() {
         system_prompt: systemPromptEl.value,
       });
       agentNameEl.value = "";
+      systemPromptDirty = false;
       await loadState();
     }),
   );
@@ -202,6 +212,7 @@ function setupEvents() {
       return;
     }
     systemPromptEl.value = state.prompts[key];
+    systemPromptDirty = false;
   });
 
   agentsEl.addEventListener("click", (event) => {
@@ -228,6 +239,9 @@ function setupEvents() {
   });
   delayEl.addEventListener("input", () => {
     configDirty = true;
+  });
+  systemPromptEl.addEventListener("input", () => {
+    systemPromptDirty = true;
   });
 }
 

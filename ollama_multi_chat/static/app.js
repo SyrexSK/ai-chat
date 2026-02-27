@@ -376,7 +376,7 @@ function setupEvents() {
       return;
     }
     commentatorPromptEl.value = state.prompts[key];
-    commentatorDirty = false;
+    commentatorDirty = true;
   });
 
   agentConnectionEl.addEventListener("change", () => {
@@ -430,6 +430,9 @@ function setupEvents() {
     systemPromptDirty = true;
   });
   commentatorNameEl.addEventListener("input", () => {
+    commentatorDirty = true;
+  });
+  commentatorModelEl.addEventListener("change", () => {
     commentatorDirty = true;
   });
   commentatorPromptEl.addEventListener("input", () => {

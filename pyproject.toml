@@ -1,13 +1,16 @@
 [project]
 name = "ollama-multi-chat"
-version = "0.2.0"
-description = "Desktop and CLI multi-model chat for local Ollama"
+version = "0.3.0"
+description = "Web and CLI multi-model chat for local Ollama"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+  "litestar>=2.8.3",
+  "granian>=1.6.0",
+]
 
 [project.scripts]
-ollama-multi-chat = "ollama_multi_chat.gui:main"
+ollama-multi-chat = "ollama_multi_chat.web:main"
 ollama-multi-chat-cli = "ollama_multi_chat.cli:main"
 
 [build-system]

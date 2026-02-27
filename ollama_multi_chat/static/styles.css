@@ -1,0 +1,235 @@
+:root {
+  --bg-0: #fff9ec;
+  --bg-1: #ffd49f;
+  --card: #fffefb;
+  --ink: #1a160f;
+  --muted: #5b5244;
+  --line: #e1c89c;
+  --accent: #0a6a5b;
+  --danger: #a53434;
+  --radius: 14px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+  font-family: "IBM Plex Sans", "Noto Sans", "Segoe UI", sans-serif;
+  background: radial-gradient(circle at 12% 8%, #fff4d4 0%, var(--bg-0) 38%),
+    linear-gradient(140deg, var(--bg-0), var(--bg-1));
+  min-height: 100vh;
+}
+
+.layout {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 18px;
+  display: grid;
+  gap: 14px;
+  height: 100vh;
+  max-height: 100vh;
+  align-content: start;
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-columns: 320px 360px 1fr;
+  grid-template-areas:
+    "topbar topbar topbar"
+    "settings agents chat";
+}
+
+.topbar {
+  grid-area: topbar;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-family: "IBM Plex Serif", Georgia, serif;
+  letter-spacing: 0.02em;
+}
+
+.status {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.panel {
+  background: color-mix(in oklab, var(--card) 92%, #ffe2bc 8%);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px;
+  min-height: 0;
+}
+
+.settings {
+  grid-area: settings;
+  align-self: start;
+}
+
+.agents {
+  grid-area: agents;
+  align-self: start;
+}
+
+.chat {
+  grid-area: chat;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  min-height: 0;
+}
+
+h2,
+h3 {
+  margin: 0 0 10px;
+  font-family: "IBM Plex Serif", Georgia, serif;
+}
+
+h3 {
+  margin-top: 14px;
+}
+
+.grid {
+  display: grid;
+  gap: 8px;
+}
+
+label {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+input,
+textarea,
+select,
+button {
+  font: inherit;
+}
+
+input,
+textarea,
+select {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  padding: 8px 10px;
+  color: var(--ink);
+}
+
+textarea {
+  resize: vertical;
+}
+
+.row {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+button {
+  border: 0;
+  border-radius: 999px;
+  padding: 8px 14px;
+  background: #e9dcc8;
+  cursor: pointer;
+}
+
+button.primary {
+  background: var(--accent);
+  color: #f8fffd;
+}
+
+button.danger {
+  background: var(--danger);
+  color: #fff3f3;
+}
+
+button:hover {
+  filter: brightness(0.96);
+}
+
+.agent-list-wrap {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  max-height: 240px;
+  overflow: auto;
+}
+
+#agents {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+#agents li {
+  padding: 8px 10px;
+  border-bottom: 1px solid #f0e8da;
+  cursor: pointer;
+}
+
+#agents li.active {
+  background: #f7efe4;
+  font-weight: 700;
+}
+
+.history {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px;
+  overflow: auto;
+  min-height: 0;
+  height: 100%;
+}
+
+.msg {
+  margin-bottom: 10px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
+
+.msg .head {
+  font-weight: 700;
+  margin-bottom: 3px;
+}
+
+.msg.user .head {
+  color: #1956ae;
+}
+
+.msg.assistant .head {
+  color: #0c6f60;
+}
+
+.msg.system .head {
+  color: #5f5f5f;
+}
+
+.msg.error .head {
+  color: #972525;
+}
+
+@media (max-width: 1100px) {
+  .layout {
+    grid-template-columns: 1fr;
+    height: auto;
+    max-height: none;
+    grid-template-areas:
+      "topbar"
+      "settings"
+      "agents"
+      "chat";
+  }
+
+  .history {
+    min-height: 300px;
+    height: 300px;
+  }
+}

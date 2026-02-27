@@ -1,5 +1,8 @@
 const statusEl = document.getElementById("status");
+const providerEl = document.getElementById("provider");
 const hostEl = document.getElementById("host");
+const apiKeyEl = document.getElementById("apiKey");
+const tokenEl = document.getElementById("token");
 const timeoutEl = document.getElementById("timeout");
 const delayEl = document.getElementById("delay");
 const agentsEl = document.getElementById("agents");
@@ -81,7 +84,10 @@ function renderHistory(container, messages) {
 function renderState(nextState) {
   state = nextState;
   if (!configDirty) {
+    providerEl.value = state.provider || "ollama";
     hostEl.value = state.host || hostEl.value;
+    apiKeyEl.value = state.api_key || "";
+    tokenEl.value = state.token || "";
     timeoutEl.value = state.timeout;
     delayEl.value = state.delay;
   }
@@ -173,7 +179,10 @@ function setupEvents() {
   document.getElementById("saveConfig").addEventListener("click", () =>
     safeAction(async () => {
       const payload = await api("/api/config", "POST", {
+        provider: providerEl.value,
         host: hostEl.value,
+        api_key: apiKeyEl.value,
+        token: tokenEl.value,
         timeout: Number(timeoutEl.value),
         delay: Number(delayEl.value),
       });
@@ -299,7 +308,16 @@ function setupEvents() {
     }
   });
 
+  providerEl.addEventListener("change", () => {
+    configDirty = true;
+  });
   hostEl.addEventListener("input", () => {
+    configDirty = true;
+  });
+  apiKeyEl.addEventListener("input", () => {
+    configDirty = true;
+  });
+  tokenEl.addEventListener("input", () => {
     configDirty = true;
   });
   timeoutEl.addEventListener("input", () => {

@@ -108,6 +108,7 @@ label {
   gap: 4px;
   color: var(--muted);
   font-size: 14px;
+  min-width: 0;
 }
 
 input,
@@ -125,6 +126,13 @@ select {
   background: #fff;
   padding: 8px 10px;
   color: var(--ink);
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+select {
+  text-overflow: ellipsis;
 }
 
 textarea {

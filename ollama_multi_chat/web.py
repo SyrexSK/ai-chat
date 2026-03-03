@@ -35,8 +35,8 @@ class ChatServerState:
     host: str = "http://127.0.0.1:11434"
     api_key: str = ""
     token: str = ""
-    timeout: float = 45.0
-    delay: float = 2.0
+    timeout: float = 100.0
+    delay: float = 8.0
 
     def __post_init__(self) -> None:
         self.prompts = load_system_prompts(self.prompts_path)
